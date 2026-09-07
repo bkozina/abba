@@ -1,0 +1,45 @@
+name: Test Datti Storefront API
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  storefront-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test tokenless Storefront API
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/payload.json <<'JSON'
+          {"query":"query { collection(handle: \"novi-pridelki\") { title products(first: 5) { nodes { id title handle availableForSale priceRange { minVariantPrice { amount currencyCode } } featuredImage { url } variants(first: 3) { nodes { id title availableForSale price { amount currencyCode } } } } } } }"}
+          JSON
+          curl --fail-with-body --show-error --silent --max-time 25 \
+            -H 'Content-Type: application/json' \
+            -X POST 'https://t16eqr-tk.myshopify.com/api/2026-07/graphql.json' \
+            --data-binary @/tmp/payload.json > /tmp/storefront-response.json
+          cat /tmp/storefront-response.json
+          python - <<'PY'
+          import json
+          p='/tmp/storefront-response.json'
+          data=json.load(open(p))
+          if data.get('errors'):
+              raise SystemExit('GraphQL errors: '+json.dumps(data['errors'], ensure_ascii=False))
+          c=data.get('data',{}).get('collection')
+          if not c:
+              raise SystemExit('Collection novi-pridelki not returned')
+          products=c.get('products',{}).get('nodes',[])
+          if not products:
+              raise SystemExit('No products returned')
+          print(f"OK: {c['title']} -> {len(products)} products")
+          for p in products:
+              print('-', p['title'])
+          PY
+
+      - name: Upload API response
+        uses: actions/upload-artifact@v4
+        with:
+          name: storefront-smoke-response
+          path: /tmp/storefront-response.json
