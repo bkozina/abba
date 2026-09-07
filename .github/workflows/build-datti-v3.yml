@@ -1,0 +1,141 @@
+name: Build Datti Trznica v3 Tested APK
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore source from previous build workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          awk '/cat > \/tmp\/datti.zip.b64/{capture=1; next} capture && /^          B64$/{exit} capture {sub(/^          /, ""); print}' .github/workflows/build-datti-apk.yml > /tmp/datti.zip.b64
+          test -s /tmp/datti.zip.b64
+          base64 -d /tmp/datti.zip.b64 > /tmp/datti.zip
+          unzip -q /tmp/datti.zip
+          test -f datti-trznica-native/App.js
+
+      - name: Patch Storefront loading reliability
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('datti-trznica-native/App.js')
+          s=p.read_text()
+          s=s.replace('variants(first: 12)', 'variants(first: 5)')
+          s=s.replace('first: 40 });', 'first: 20 });')
+          old="""async function shopify(query, variables = {}) {
+            const response = await fetch(ENDPOINT, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query, variables }),
+            });
+            const json = await response.json();
+          """.replace('            ','')
+          new="""async function shopify(query, variables = {}) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15000);
+            let response;
+            try {
+              response = await fetch(ENDPOINT, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                body: JSON.stringify({ query, variables }),
+                signal: controller.signal,
+              });
+            } catch (e) {
+              if (e?.name === 'AbortError') throw new Error('Shopify se ni odzval v 15 sekundah. Poskusi znova.');
+              throw new Error('Ni povezave s Shopifyjem. Preveri internetno povezavo.');
+            } finally {
+              clearTimeout(timeout);
+            }
+            const text = await response.text();
+            let json;
+            try { json = JSON.parse(text); }
+            catch { throw new Error(`Shopify je vrnil neveljaven odgovor (HTTP ${response.status}).`); }
+          """.replace('            ','')
+          if old not in s:
+              raise SystemExit('Expected shopify() block not found')
+          s=s.replace(old,new)
+          p.write_text(s)
+          print('Patched App.js successfully')
+          PY
+
+      - name: Smoke test exact Storefront product query
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/payload.json <<'JSON'
+          {"query":"query CollectionProducts($handle: String!, $first: Int!) { collection(handle: $handle) { id title description products(first: $first) { nodes { id title handle description featuredImage { url altText } priceRange { minVariantPrice { amount currencyCode } } variants(first: 5) { nodes { id title availableForSale price { amount currencyCode } selectedOptions { name value } } } } } } }","variables":{"handle":"novi-pridelki","first":20}}
+          JSON
+          curl --fail-with-body --show-error --silent --max-time 20 \
+            -H 'Content-Type: application/json' -H 'Accept: application/json' \
+            -X POST 'https://t16eqr-tk.myshopify.com/api/2026-07/graphql.json' \
+            --data-binary @/tmp/payload.json > /tmp/storefront.json
+          python - <<'PY'
+          import json
+          d=json.load(open('/tmp/storefront.json'))
+          if d.get('errors'): raise SystemExit('GraphQL errors: '+json.dumps(d['errors'],ensure_ascii=False))
+          c=d.get('data',{}).get('collection')
+          if not c: raise SystemExit('Collection not returned')
+          ps=c.get('products',{}).get('nodes',[])
+          if len(ps) < 1: raise SystemExit('No products returned')
+          print('API OK:', c['title'], len(ps), 'products')
+          for p in ps[:5]: print('-',p['title'])
+          PY
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        working-directory: datti-trznica-native
+        run: npm install --no-audit --no-fund
+
+      - name: Expo prebuild
+        working-directory: datti-trznica-native
+        run: npx expo prebuild --platform android --non-interactive --clean
+
+      - name: Build standalone release APK
+        working-directory: datti-trznica-native
+        env:
+          NODE_ENV: production
+        run: |
+          chmod +x android/gradlew
+          cd android
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Verify APK and bundle
+        working-directory: datti-trznica-native
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          test -s "$APK"
+          unzip -l "$APK" > /tmp/apk-list.txt
+          grep -E 'index\.android\.bundle|index\.bundle|assets/.+bundle' /tmp/apk-list.txt
+          echo "APK size: $(stat -c%s "$APK") bytes"
+
+      - name: Upload tested APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Datti-Trznica-v3-Tested-APK
+          path: datti-trznica-native/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
