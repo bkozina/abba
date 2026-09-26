@@ -1,0 +1,4 @@
+const http=require("http"),fs=require("fs"),path=require("path");
+const port=process.env.PORT||3000, root=__dirname;
+const types={".html":"text/html; charset=utf-8",".css":"text/css",".js":"application/javascript",".png":"image/png",".jpg":"image/jpeg",".jpeg":"image/jpeg",".svg":"image/svg+xml"};
+http.createServer((req,res)=>{let p=req.url.split("?")[0];if(p==="/")p="/index.html";const f=path.join(root,p);if(!f.startsWith(root)){res.writeHead(403);return res.end("Forbidden")}fs.readFile(f,(e,d)=>{if(e){res.writeHead(404);return res.end("Not found")}res.writeHead(200,{"Content-Type":types[path.extname(f)]||"application/octet-stream","Cache-Control":"public,max-age=300"});res.end(d)})}).listen(port,"0.0.0.0",()=>console.log("Obcina Dol demo on "+port));
